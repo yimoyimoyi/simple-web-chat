@@ -72,13 +72,13 @@ export async function getRoomInfo(env, name) {
  * @param {string} name - 房间名
  * @param {string} passwordHash - 房间密码哈希（如果房间有密码）
  */
-export async function deleteRoom(env, name, passwordHash = null) {
+export async function deleteRoom(env, name, passwordHash = null, skipAuth = false) {
   if (name === 'default') {
     throw new Error('不能删除默认房间');
   }
 
-  // 验证房间密码（统一使用 middleware/auth.js 版本）
-  await verifyRoomPassword(env, name, passwordHash);
+  // 验证房间密码（统一使用 middleware/auth.js 版本；admin 后台可跳过）
+  if (!skipAuth) await verifyRoomPassword(env, name, passwordHash);
 
   // 删除房间
   await env.DB.prepare(`DELETE FROM rooms WHERE name = ?`).bind(name).run();

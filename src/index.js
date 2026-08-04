@@ -4,12 +4,14 @@ import { LIMITS } from './config.js';
 import { handleRoomsAPI } from './api/rooms.js';
 import { handleMessagesAPI } from './api/messages.js';
 import { handleFilesAPI } from './api/files.js';
+import { handleAdminAPI } from './api/admin.js';
 import { errorResponse, corsResponse } from './utils/response.js';
 import { verifyRoomPassword } from './middleware/auth.js';
 import { reqCache } from './utils/cache.js';
 import { HTML_HEAD, HTML_BODY } from './static/index.html.js';
 import { CSS_PAGE } from './static/style.css.js';
 import { JS_PAGE } from './static/app.js.js';
+import { ADMIN_HTML } from './static/admin.html.js';
 
 // 拼接完整 HTML 页面（只在首次请求时拼接）
 let cachedHTML = null;
@@ -52,6 +54,17 @@ export default {
         });
       }
 
+      // 管理后台页面（真正的保护在 /api/admin/* 的密码鉴权）
+      if (path === '/admin') {
+        return new Response(ADMIN_HTML, {
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'X-Frame-Options': 'DENY',
+          },
+        });
+      }
+
       // WebSocket
       if (path === '/api/ws') {
         const room = url.searchParams.get('room') || 'default';
@@ -70,6 +83,10 @@ export default {
 
       // API 路由
       if (path.startsWith('/api/')) {
+        // 管理后台 API（内部自行鉴权）
+        if (path.startsWith('/api/admin/')) {
+          return handleAdminAPI(request, env, path, url);
+        }
         const roomsRes = await handleRoomsAPI(request, env, path, url);
         if (roomsRes) return roomsRes;
         const msgsRes = await handleMessagesAPI(request, env, path, url);

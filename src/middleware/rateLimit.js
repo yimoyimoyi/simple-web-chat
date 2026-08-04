@@ -29,9 +29,9 @@ function memDenySet(key) {
  * @param {number} maxPerMinute - 每分钟最大请求数
  * @returns {Promise<boolean>} - true 表示允许，false 表示超限
  */
-export async function checkRateLimit(env, key, maxPerMinute) {
+export async function checkRateLimit(env, key, maxPerMinute, windowMs = 60000) {
   const now = Date.now();
-  const windowStart = Math.floor(now / 60000) * 60000;
+  const windowStart = Math.floor(now / windowMs) * windowMs;
   // 主键含窗口，窗口过期自然失效；window_start 列用于一致性校验
   const dbKey = `rate:${key}:${windowStart}`;
   const memKey = `rl:${dbKey}`;

@@ -146,9 +146,9 @@ export async function searchMessages(env, room, keyword, limit = 50, before = nu
  * @param {string} id - 消息 ID
  * @param {string} passwordHash - 房间密码哈希（如果房间有密码）
  */
-export async function deleteMessage(env, room, id, passwordHash = null) {
-  // 验证房间密码
-  await verifyRoomPassword(env, room, passwordHash);
+export async function deleteMessage(env, room, id, passwordHash = null, skipAuth = false) {
+  // 验证房间密码（admin 后台可跳过）
+  if (!skipAuth) await verifyRoomPassword(env, room, passwordHash);
 
   // 查找消息
   const message = await env.DB.prepare(
