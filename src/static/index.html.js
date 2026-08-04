@@ -4,7 +4,8 @@ export const HTML_HEAD = `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
 <title>逸陌聊天室</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>✨</text></svg>">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -14,24 +15,24 @@ export const HTML_HEAD = `<!doctype html>
 </head>`;
 
 export const HTML_BODY = `<body>
-<button id="sidebarToggle">☰</button>
+<button id="sidebarToggle" aria-label="打开房间列表">☰</button>
 <div id="sidebarOverlay"></div>
 <div id="app">
   <div id="rooms">
-    <input id="newRoomInput" placeholder="创建房间" />
+    <input id="newRoomInput" placeholder="创建房间" aria-label="创建房间" />
     <div id="roomList"></div>
   </div>
   <div id="main">
     <div id="topBar">
-      <input id="searchInput" placeholder="搜索消息..." />
-      <button id="toggleTheme">🌙</button>
-      <button id="refreshBtn"><span>刷新</span> ♻️</button>
+      <input id="searchInput" placeholder="搜索消息..." aria-label="搜索消息" />
+      <button id="toggleTheme" aria-label="切换主题">🌙</button>
+      <button id="refreshBtn" aria-label="刷新"><span>刷新</span> ♻️</button>
     </div>
     <div id="messages" aria-live="polite"></div>
     <div id="inputArea">
-      <textarea id="textInput" placeholder="输入消息...（支持粘贴图片）"></textarea>
+      <textarea id="textInput" placeholder="输入消息...（支持粘贴图片）" aria-label="输入消息"></textarea>
       <div class="controls">
-        <button id="uploadBtn"><span>发送文件</span> 📎</button>
+        <button id="uploadBtn" aria-label="发送文件"><span>发送文件</span> 📎</button>
         <input id="fileInput" type="file" multiple style="display:none" />
         <button id="sendBtn" class="primary">发送</button>
       </div>

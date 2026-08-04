@@ -42,9 +42,14 @@ export default {
         }
       }
 
-      // 静态页面
+      // 静态页面（短 TTL + stale-while-revalidate：避免每次刷新重传 30KB 内联资源，部署后 5 分钟内生效）
       if (path === '/' || path === '/index.html') {
-        return new Response(getHTML(), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+        return new Response(getHTML(), {
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'public, max-age=300, stale-while-revalidate=86400',
+          },
+        });
       }
 
       // WebSocket

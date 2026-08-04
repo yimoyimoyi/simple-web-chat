@@ -5,11 +5,11 @@ export const CSS_PAGE = `
   --bg: #f0f2f5;
   --panel: #ffffff;
   --text: #1a1a2e;
-  --muted: #8e99a4;
+  --muted: #667085;
   --accent: #4361ee;
   --accent-light: #e8edff;
   --accent-strong: #2c55d6;
-  --danger: #ef476f;
+  --danger: #d43b5f;
   --danger-light: #fde8ed;
   --bubble: #ffffff;
   --bubble-text: #1a1a2e;
@@ -35,7 +35,7 @@ export const CSS_PAGE = `
   --bg: #0f1117;
   --panel: #1a1d28;
   --text: #e4e6eb;
-  --muted: #7a8299;
+  --muted: #6d768b;
   --accent: #5b7bf9;
   --accent-light: #1e2440;
   --accent-strong: #4a68e8;
@@ -63,6 +63,36 @@ export const CSS_PAGE = `
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
+
+/* 键盘焦点可见性（纯键盘用户） */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 减少动画偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .message, .roomItem, .toast, .contextMenu, .modalBox { animation: none !important; transition: none !important; }
+}
+
+/* 确认弹窗消息文本 */
+.confirmMsg {
+  color: var(--muted);
+  margin-bottom: 16px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* 图片查看器加载占位 */
+.imgViewerLoading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: #fff;
+  font-size: 14px;
+  opacity: 0.8;
+}
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   background: var(--bg);
@@ -114,12 +144,18 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  width: 100%;
   padding: 10px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text);
   border-radius: 10px;
   cursor: pointer;
   margin-bottom: 4px;
   transition: background 0.15s, color 0.15s;
   font-size: 14px;
+  text-align: left;
+  font-family: inherit;
 }
 .roomItem:hover { background: var(--input); }
 .roomItem.active {
@@ -223,6 +259,9 @@ body {
   font-size: 14px;
   line-height: 1.6;
   animation: msgIn 0.2s ease-out;
+  /* 离屏消息跳过渲染与布局（大房间滚动性能），不干扰上拉加载 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 60px;
 }
 @keyframes msgIn {
   from { opacity: 0; transform: translateY(6px); }

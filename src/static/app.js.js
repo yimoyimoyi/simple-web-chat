@@ -75,6 +75,24 @@ function isTextFile(fileName, fileType) {
   return textExts.some(ext => fileName.endsWith(ext));
 }
 
+// 解码文本缓冲区（自动检测编码：UTF-8 / GBK / GB2312）
+function decodeTextBuffer(buf) {
+  const bytes = new Uint8Array(buf);
+  // 检测 BOM
+  if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+    return new TextDecoder('utf-8').decode(buf);
+  }
+  // 尝试 UTF-8，检测是否有乱码特征
+  const utf8 = new TextDecoder('utf-8', { fatal: false }).decode(buf);
+  if (!utf8.includes('�')) return utf8;
+  // UTF-8 有乱码，尝试 GBK
+  try {
+    return new TextDecoder('gbk').decode(buf);
+  } catch(e) {
+    return utf8; // GBK 也失败，回退 UTF-8
+  }
+}
+
 function escapeHtml(s) {
   if (s == null) return '';
   return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
@@ -139,6 +157,10 @@ if (sidebarToggle) sidebarToggle.onclick = () => {
   roomsPanel.classList.contains('open') ? closeSidebar() : openSidebar();
 };
 if (sidebarOverlay) sidebarOverlay.onclick = closeSidebar;
+// Esc 关闭侧边栏（桌面端快捷键）
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && roomsPanel && roomsPanel.classList.contains('open')) closeSidebar();
+});
 
 // ============ Toast ============
 let toastTimer = null;
@@ -152,21 +174,35 @@ function showToast(msg, type) {
 
 // ============ 弹窗工具 ============
 let modalCounter = 0;
-function showModal(title, fields, onSubmit) {
+function showModal(title, fields, onSubmit, onCancel) {
   const mid = ++modalCounter;
   const overlay = document.createElement('div');
   overlay.className = 'modalOverlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-labelledby', 'modalTitle_' + mid);
   overlay.innerHTML = '<div class="modalBox">' +
-    '<h3>' + escapeHtml(title) + '</h3>' +
+    '<h3 id="modalTitle_' + mid + '">' + escapeHtml(title) + '</h3>' +
     fields.map(f => '<input type="' + (f.type || 'text') + '" placeholder="' + escapeHtml(f.placeholder || '') + '" id="modal_' + mid + '_' + f.name + '" />').join('') +
     '<div class="modalError" id="modalError_' + mid + '"></div>' +
     '<div class="modalActions"><button class="modalCancel">取消</button><button class="modalConfirm">确定</button></div>' +
     '</div>';
   document.body.appendChild(overlay);
 
-  const close = () => overlay.remove();
-  overlay.querySelector('.modalCancel').onclick = close;
-  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  // 记录焦点来源，关闭时恢复（键盘可达性）
+  const prevFocus = document.activeElement;
+  // 统一 Esc 处理（无论焦点在输入框还是按钮上）
+  const escHandler = (e) => { if (e.key === 'Escape') close(true); };
+  document.addEventListener('keydown', escHandler);
+  // 关闭时回调 onCancel（防止 await 永久挂起）
+  const close = (cancelled) => {
+    document.removeEventListener('keydown', escHandler);
+    overlay.remove();
+    if (prevFocus && prevFocus.focus) prevFocus.focus();
+    if (cancelled && onCancel) onCancel();
+  };
+  overlay.querySelector('.modalCancel').onclick = () => close(true);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(true); });
 
   overlay.querySelector('.modalConfirm').onclick = async () => {
     const values = {};
@@ -174,7 +210,7 @@ function showModal(title, fields, onSubmit) {
     const errEl = document.getElementById('modalError_' + mid);
     try {
       await onSubmit(values);
-      close();
+      close(false);
     } catch(e) {
       if (errEl) errEl.textContent = e.message;
     }
@@ -189,10 +225,31 @@ function showModal(title, fields, onSubmit) {
           if (i < inputs.length - 1) { inputs[i + 1].focus(); }
           else { overlay.querySelector('.modalConfirm').click(); }
         }
-        if (e.key === 'Escape') { close(); }
       });
     });
   }
+}
+
+/**
+ * 确认弹窗（替代原生 confirm，Promise<boolean>）
+ */
+function showConfirm(title, message, confirmText = '确定') {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modalOverlay';
+    overlay.innerHTML = '<div class="modalBox">' +
+      '<h3>' + escapeHtml(title) + '</h3>' +
+      '<div class="confirmMsg">' + escapeHtml(message) + '</div>' +
+      '<div class="modalActions"><button class="modalCancel">取消</button><button class="modalConfirm danger">' + escapeHtml(confirmText) + '</button></div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    const done = v => { overlay.remove(); document.removeEventListener('keydown', esc); resolve(v); };
+    const esc = e => { if (e.key === 'Escape') done(false); };
+    overlay.querySelector('.modalCancel').onclick = () => done(false);
+    overlay.addEventListener('click', e => { if (e.target === overlay) done(false); });
+    overlay.querySelector('.modalConfirm').onclick = () => done(true);
+    document.addEventListener('keydown', esc);
+  });
 }
 
 // ============ WebSocket ============
@@ -201,6 +258,7 @@ let wsConnectedRoom = null;  // 当前连接的房间
 let wsRetryCount = 0;
 let wsDisconnectTimer = null;
 let wsIntentional = false;   // 是否为主动关闭
+let wsBackfillPending = false; // 重连成功后是否补拉断线期间的消息
 
 // ============ 心跳 ============
 // 每 30 秒发送 JSON ping（服务端 setWebSocketAutoResponse 自动应答 pong，不唤醒 DO）
@@ -238,9 +296,10 @@ function closeWebSocket() {
   wsRetryCount = 0;
 }
 
-function connectWebSocket() {
+function connectWebSocket(backfillOnOpen = false) {
   closeWebSocket();
   wsIntentional = false;
+  wsBackfillPending = backfillOnOpen;
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   try {
     ws = new WebSocket(proto + '//' + location.host + '/api/ws?room=' + encodeURIComponent(currentRoom));
@@ -251,6 +310,11 @@ function connectWebSocket() {
       if (wsDisconnectTimer) { clearTimeout(wsDisconnectTimer); wsDisconnectTimer = null; }
       if (connectionBar) connectionBar.className = '';
       startHeartbeat(); // 连接建立后启动心跳
+      // 重连成功：补拉断线期间的消息（保留滚动位置）
+      if (wsBackfillPending) {
+        wsBackfillPending = false;
+        fetchMessages(false, { preserveScroll: true });
+      }
     });
     ws.addEventListener('message', (e) => {
       try {
@@ -282,7 +346,7 @@ function connectWebSocket() {
           }
         }, 5000);
       }
-      reconnectTimer = setTimeout(connectWebSocket, Math.min((wsRetryCount + 1) * 2000, 15000));
+      reconnectTimer = setTimeout(() => connectWebSocket(true), Math.min((wsRetryCount + 1) * 2000, 15000)); // 重连成功后补拉消息
     });
     ws.addEventListener('error', () => {
       // 仅当非主动关闭时才触发关闭
@@ -295,7 +359,7 @@ function connectWebSocket() {
         if (!wsConnected) showToast('网络连接不稳定', 'error');
       }, 5000);
     }
-    reconnectTimer = setTimeout(connectWebSocket, 5000);
+    reconnectTimer = setTimeout(() => connectWebSocket(true), 5000);
   }
 }
 
@@ -346,10 +410,14 @@ async function loadRooms() {
 function renderRooms() {
   roomListEl.innerHTML = '';
   rooms.forEach(r => {
-    const div = document.createElement('div');
+    // button 语义：键盘 Tab/Enter/Space 可达
+    const div = document.createElement('button');
+    div.type = 'button';
     div.className = 'roomItem' + (r === currentRoom ? ' active' : '');
+    if (r === currentRoom) div.setAttribute('aria-current', 'true');
     div.innerHTML = '<span class="name">' + escapeHtml(r) + '</span>';
     div.addEventListener('click', async () => {
+      if (roomSuppressClick) { roomSuppressClick = false; return; } // 长按菜单触发，拦截误切房
       if (currentRoom === r) return;
       // 密码检查
       const needPassword = await checkRoomNeedsPassword(r);
@@ -360,6 +428,10 @@ function renderRooms() {
       currentRoom = r;
       roomLastActive[r] = Date.now();
       try { localStorage.setItem('roomLastActive', JSON.stringify(roomLastActive)); } catch(e) {}
+      // 按活跃时间重新排序（default 恒第一），刚访问的房间立即置顶
+      const sortedOthers = rooms.filter(x => x !== 'default');
+      sortedOthers.sort((a, b) => (roomLastActive[b] || 0) - (roomLastActive[a] || 0));
+      rooms = ['default', ...sortedOthers];
       window.history.replaceState({}, '', '?room=' + encodeURIComponent(r));
       renderRooms();
       closeSidebar();
@@ -399,12 +471,12 @@ async function promptRoomPassword(room) {
       roomPasswords[room] = hash;
       showToast('密码验证成功', 'success');
       resolve();
-    });
+    }, () => resolve()); // 取消也 resolve（roomPasswords 未设置，调用方据此处理）
   });
 }
 
 // ============ 消息管理 ============
-async function fetchMessages(force) {
+async function fetchMessages(force, opts = {}) {
   const room = currentRoom;
   try {
     const kw = searchInput.value.trim().toLowerCase();
@@ -412,15 +484,22 @@ async function fetchMessages(force) {
     const res = await fetch(url);
     let msgs = await safeJson(res) || [];
     if (force || room === currentRoom) {
+      const scrollTop = messagesEl.scrollTop;
+      const nearBottom = isNearBottom();
+      // 批量渲染期间暂停朗读（避免屏幕阅读器一次读 50 条）
+      messagesEl.setAttribute('aria-live', 'off');
       messagesEl.innerHTML = '';
       noMoreHistory = false;
       renderMessages(msgs);
+      messagesEl.setAttribute('aria-live', 'polite');
       if (force || isInitialLoad) { messagesEl.scrollTop = messagesEl.scrollHeight; isInitialLoad = false; }
+      else if (opts.preserveScroll) messagesEl.scrollTop = nearBottom ? messagesEl.scrollHeight : scrollTop;
     }
   } catch(e) { if (room === currentRoom) messagesEl.innerHTML = ''; }
 }
 
-function renderSingleMessage(m) {
+function renderSingleMessage(m, opts = {}) {
+  const { append = true } = opts;
   const dataId = String(m.id || m.file_id || '');
   if (!dataId) return null;
   let wrapper = messagesEl.querySelector('[data-id="' + dataId + '"]');
@@ -549,47 +628,46 @@ function renderSingleMessage(m) {
       previewContent.className = 'textPreviewContent';
       previewContent.textContent = '加载中...';
       previewWrap.appendChild(previewContent);
-      // 展开/收起按钮
+      // 展开/收起按钮（展开时懒加载全文，不将全文存入 DOM——避免大文件常驻内存）
       const expandBtn = document.createElement('div');
       expandBtn.className = 'textExpandBtn';
       expandBtn.textContent = '展开全文 ▼';
       let expanded = false;
-      expandBtn.onclick = (e) => {
+      expandBtn.onclick = async (e) => {
         e.stopPropagation();
-        expanded = !expanded;
-        previewContent.classList.toggle('expanded', expanded);
-        expandBtn.textContent = expanded ? '收起 ▲' : '展开全文 ▼';
+        if (expanded) {
+          // 收起：恢复预览片段
+          expanded = false;
+          previewContent.classList.remove('expanded');
+          expandBtn.textContent = '展开全文 ▼';
+          return;
+        }
+        // 展开：重新 fetch 全文（懒加载）
+        expandBtn.textContent = '加载中...';
+        try {
+          const res = await fetch(rawUrl);
+          const fullBuf = await res.arrayBuffer();
+          if (!wrapper.isConnected) return; // 期间已切房间
+          const fullText = decodeTextBuffer(fullBuf);
+          previewContent.classList.add('expanded');
+          previewContent.textContent = fullText;
+          expandBtn.textContent = '收起 ▲';
+          expanded = true;
+        } catch(err) {
+          expandBtn.textContent = '展开全文 ▼';
+          showToast('全文加载失败', 'error');
+        }
       };
-      // 加载文本内容（自动检测编码：UTF-8 / GBK / GB2312）
+      // 加载预览片段（自动检测编码：UTF-8 / GBK / GB2312）
       fetch(rawUrl).then(r => r.arrayBuffer()).then(buf => {
         // 校验 wrapper 仍在 DOM 中（防止切房间后写入已销毁元素）
         if (!wrapper.isConnected) return;
-        const bytes = new Uint8Array(buf);
-        let text = '';
-        // 检测 BOM
-        if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
-          text = new TextDecoder('utf-8').decode(buf);
-        } else {
-          // 尝试 UTF-8，检测是否有乱码特征
-          const utf8 = new TextDecoder('utf-8', { fatal: false }).decode(buf);
-          const hasGarbled = utf8.includes('�');
-          if (!hasGarbled) {
-            text = utf8;
-          } else {
-            // UTF-8 有乱码，尝试 GBK
-            try {
-              text = new TextDecoder('gbk').decode(buf);
-            } catch(e) {
-              text = utf8; // GBK 也失败，回退 UTF-8
-            }
-          }
-        }
+        const text = decodeTextBuffer(buf);
         const lines = text.split('\\n');
         const preview = lines.slice(0, 20).join('\\n');
         previewContent.textContent = preview;
         if (lines.length > 20) {
           previewWrap.appendChild(expandBtn);
-          previewContent.dataset.full = text;
         }
       }).catch(() => { previewContent.textContent = '预览加载失败'; });
       wrapper.appendChild(previewWrap);
@@ -623,10 +701,10 @@ function renderSingleMessage(m) {
   time.textContent = nowFmt(m.timestamp);
   wrapper.appendChild(time);
 
-  // 绑定上下文菜单（长按/右键）
-  attachContextMenu(wrapper, m);
+  // 消息数据入 WeakMap（事件委托取用；元素移除时自动 GC）
+  msgMap.set(wrapper, m);
 
-  if (isNew) messagesEl.appendChild(wrapper);
+  if (isNew && append) messagesEl.appendChild(wrapper);
   return wrapper;
 }
 
@@ -719,7 +797,7 @@ function hideContextMenu() {
   if (contextMenuEl) { contextMenuEl.remove(); contextMenuEl = null; }
 }
 
-function showContextMenu(wrapper, m, x, y) {
+function showContextMenuAt(items, x, y) {
   hideContextMenu();
   // 遮罩层（点击关闭）
   contextMenuOverlay = document.createElement('div');
@@ -730,29 +808,6 @@ function showContextMenu(wrapper, m, x, y) {
   // 菜单面板
   contextMenuEl = document.createElement('div');
   contextMenuEl.className = 'contextMenu';
-  var items = [];
-  // 复制：文本消息复制内容，文件消息复制直链
-  items.push({ label: '复制', icon: '📋', action: function() {
-    hideContextMenu();
-    var text = m.type === 'text' ? (m.content || '') : location.origin + '/api/file-raw?room=' + encodeURIComponent(currentRoom) + '&fileId=' + (m.file_id || m.id);
-    navigator.clipboard.writeText(text).then(function() { showToast('已复制', 'success'); });
-  }});
-  // 编辑（仅文本消息）
-  if (m.type === 'text') {
-    items.push({ label: '编辑', icon: '✏️', action: function() {
-      hideContextMenu();
-      startEditMessage(wrapper, m);
-    }});
-  }
-  // 删除
-  items.push({ label: '删除', icon: '🗑️', cls: 'danger', action: function() {
-    hideContextMenu();
-    if (!confirm('确定删除？')) return;
-    var dataId = String(m.id || m.file_id || '');
-    fetch('/api/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({room:currentRoom,id:dataId}) });
-    wrapper.remove();
-  }});
-  // 构建菜单项
   items.forEach(function(item) {
     var btn = document.createElement('button');
     btn.className = 'contextMenuItem' + (item.cls ? ' ' + item.cls : '');
@@ -764,37 +819,183 @@ function showContextMenu(wrapper, m, x, y) {
   // 位置自适应（防止溢出屏幕）
   var menuW = contextMenuEl.offsetWidth || 150;
   var menuH = contextMenuEl.offsetHeight || 150;
-  var left = Math.min(x, window.innerWidth - menuW - 8);
-  var top = Math.min(y, window.innerHeight - menuH - 8);
-  contextMenuEl.style.left = Math.max(4, left) + 'px';
-  contextMenuEl.style.top = Math.max(4, top) + 'px';
+  contextMenuEl.style.left = Math.max(4, Math.min(x, window.innerWidth - menuW - 8)) + 'px';
+  contextMenuEl.style.top = Math.max(4, Math.min(y, window.innerHeight - menuH - 8)) + 'px';
 }
 
-function attachContextMenu(wrapper, m) {
+function showContextMenu(wrapper, m, x, y) {
+  var items = [];
+  // 复制：文本消息复制内容，文件消息复制直链
+  items.push({ label: '复制', icon: '📋', action: function() {
+    hideContextMenu();
+    var text = m.type === 'text' ? (m.content || '') : location.origin + API_ROOT + '/file-raw?room=' + encodeURIComponent(currentRoom) + '&fileId=' + (m.file_id || m.id);
+    navigator.clipboard.writeText(text).then(function() { showToast('已复制', 'success'); });
+  }});
+  // 编辑（仅文本消息）
+  if (m.type === 'text') {
+    items.push({ label: '编辑', icon: '✏️', action: function() {
+      hideContextMenu();
+      startEditMessage(wrapper, m);
+    }});
+  }
+  // 删除（弹窗确认 + 校验响应 + 传房间密码，成功才移除本地节点）
+  items.push({ label: '删除', icon: '🗑️', cls: 'danger', action: async function() {
+    hideContextMenu();
+    if (!await showConfirm('删除消息', '确定删除这条消息吗？此操作不可恢复。')) return;
+    var dataId = String(m.id || m.file_id || '');
+    try {
+      const res = await fetch(API_ROOT + '/delete', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ room: currentRoom, id: dataId, passwordHash: roomPasswords[currentRoom] || null })
+      });
+      const data = await safeJson(res);
+      if (!res.ok || !data || !data.ok) throw new Error(data ? data.error : '删除失败');
+      wrapper.remove();
+    } catch(e) { showToast('删除失败: ' + e.message, 'error'); }
+  }});
+  showContextMenuAt(items, x, y);
+}
+
+// ============ 消息事件委托（长按/右键菜单） ============
+// 替代逐消息注册 5 个监听器：messagesEl 统一委托，2000 条消息也不增长监听器数量
+// 消息数据经 msgMap（WeakMap）按 data-id 元素取用
+const msgMap = new WeakMap();
+let msgLongPressTimer = null;
+
+// 判断目标是否属于消息自身交互元素（下载/复制/图片/播放器/编辑框——不弹菜单）
+function isMsgInteractive(target) {
+  return !!target.closest('.fileActions, img.imgThumb, audio, video, textarea, input');
+}
+
+messagesEl.addEventListener('touchstart', function(e) {
+  const wrapper = e.target.closest('.message[data-id]');
+  if (!wrapper || !msgMap.has(wrapper) || isMsgInteractive(e.target)) return;
+  msgLongPressTimer = setTimeout(function() {
+    const touch = e.touches[0] || e.changedTouches[0];
+    const m = msgMap.get(wrapper);
+    if (m) showContextMenu(wrapper, m, touch.clientX, touch.clientY);
+  }, 500);
+}, { passive: true });
+messagesEl.addEventListener('touchmove', function() {
+  if (msgLongPressTimer) { clearTimeout(msgLongPressTimer); msgLongPressTimer = null; }
+}, { passive: true });
+messagesEl.addEventListener('touchend', function() {
+  if (msgLongPressTimer) { clearTimeout(msgLongPressTimer); msgLongPressTimer = null; }
+});
+messagesEl.addEventListener('touchcancel', function() {
+  if (msgLongPressTimer) { clearTimeout(msgLongPressTimer); msgLongPressTimer = null; }
+});
+messagesEl.addEventListener('contextmenu', function(e) {
+  const wrapper = e.target.closest('.message[data-id]');
+  if (!wrapper || !msgMap.has(wrapper) || isMsgInteractive(e.target)) return;
+  e.preventDefault();
+  if (contextMenuEl) return; // 防止与长按重复
+  const m = msgMap.get(wrapper);
+  if (m) showContextMenu(wrapper, m, e.clientX, e.clientY);
+});
+
+// ============ 房间上下文菜单（长按/右键删除） ============
+// 长按后 touchend 会触发 click 切房，用模块级标志拦截
+let roomSuppressClick = false;
+
+function attachRoomContextMenu(roomItem, roomName) {
   var longPressTimer = null;
-  // 触摸长按（500ms）
-  wrapper.addEventListener('touchstart', function(e) {
+  roomItem.addEventListener('touchstart', function(e) {
     if (longPressTimer) clearTimeout(longPressTimer);
     longPressTimer = setTimeout(function() {
+      roomSuppressClick = true; // 拦截长按后的 click 切房
+      setTimeout(function() { roomSuppressClick = false; }, 800); // 兜底复位
       var touch = e.touches[0] || e.changedTouches[0];
-      showContextMenu(wrapper, m, touch.clientX, touch.clientY);
+      showRoomMenu(roomName, touch.clientX, touch.clientY);
     }, 500);
   }, { passive: true });
-  wrapper.addEventListener('touchmove', function() {
+  roomItem.addEventListener('touchmove', function() {
     if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
   }, { passive: true });
-  wrapper.addEventListener('touchend', function() {
+  roomItem.addEventListener('touchend', function() {
     if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
   });
-  wrapper.addEventListener('touchcancel', function() {
+  roomItem.addEventListener('touchcancel', function() {
     if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
   });
-  // 右键菜单（桌面端）- 始终拦截原生菜单
-  wrapper.addEventListener('contextmenu', function(e) {
+  roomItem.addEventListener('contextmenu', function(e) {
     e.preventDefault();
     if (contextMenuEl) return; // 防止与长按重复
-    showContextMenu(wrapper, m, e.clientX, e.clientY);
+    showRoomMenu(roomName, e.clientX, e.clientY);
   });
+}
+
+/**
+ * 删除房间完整流程：密码处理 → 二次确认 → 执行 → 清理本地状态
+ */
+async function deleteRoomFlow(roomName) {
+  // 1. 密码处理：缓存优先 → 预检 → 弹窗输入
+  let passwordHash = roomPasswords[roomName] || null;
+  if (!passwordHash) {
+    try {
+      const needPw = await checkRoomNeedsPassword(roomName);
+      if (needPw) {
+        await new Promise((resolve, reject) => {
+          showModal('删除房间 "' + roomName + '"', [
+            { name: 'password', placeholder: '请输入房间密码', type: 'password' }
+          ], async (values) => {
+            if (!values.password) throw new Error('请输入密码');
+            const hash = await sha256(values.password);
+            const res = await fetch(API_ROOT + '/room/verify', {
+              method: 'POST', headers: {'Content-Type':'application/json'},
+              body: JSON.stringify({ room: roomName, password: hash })
+            });
+            const data = await safeJson(res);
+            if (!res.ok || !data || !data.ok) throw new Error(data ? data.error : '密码错误');
+            passwordHash = hash;
+            roomPasswords[roomName] = hash;
+            resolve();
+          }, reject); // 用户取消 → reject → 中止删除
+        });
+      }
+    } catch(e) { return; } // 取消或验证失败
+  }
+  // 2. 二次确认（复用弹窗组件，替代原生 confirm）
+  const ok = await showConfirm('删除房间', '确定删除房间 "' + roomName + '" 吗？其中的所有消息和文件将被永久删除，无法恢复。');
+  if (!ok) return;
+  // 3. 执行删除
+  try {
+    const res = await fetch(API_ROOT + '/room/delete', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ room: roomName, passwordHash })
+    });
+    const data = await safeJson(res);
+    if (!res.ok || !data || !data.ok) throw new Error(data ? data.error : '删除失败');
+  } catch(e) { showToast('删除失败: ' + e.message, 'error'); return; }
+  // 4. 清理本地状态
+  delete roomPasswords[roomName];
+  delete roomLastActive[roomName];
+  try { localStorage.setItem('roomLastActive', JSON.stringify(roomLastActive)); } catch(e) {}
+  // 5. 删除的是当前房间 → 切回 default 并重建 WS（旧连接仍挂在已删房间的 DO 上）
+  if (currentRoom === roomName) {
+    currentRoom = 'default';
+    window.history.replaceState({}, '', '?room=default');
+    isInitialLoad = true;
+    noMoreHistory = false;
+    await loadRooms();
+    await fetchMessages(true);
+    connectWebSocket();
+    closeSidebar();
+  } else {
+    await loadRooms(); // 刷新列表
+  }
+  showToast('房间已删除', 'success');
+}
+
+function showRoomMenu(roomName, x, y) {
+  // default 房间不可删除，不弹菜单
+  if (roomName === 'default') return;
+  var items = [];
+  items.push({ label: '删除房间', icon: '🗑️', cls: 'danger', action: function() {
+    hideContextMenu();
+    deleteRoomFlow(roomName);
+  }});
+  showContextMenuAt(items, x, y);
 }
 
 // ============ 自定义音频播放器 ============
@@ -841,13 +1042,12 @@ function createCustomAudioPlayer(url) {
     var ratio = (clientX - rect.left) / rect.width;
     audio.currentTime = Math.max(0, Math.min(ratio, 1)) * audio.duration;
   }
+  // Pointer Capture：拖拽事件绑定在元素上，随节点回收无泄漏（替代 document 级监听）
   progressWrap.addEventListener('click', function(e) { seekByClientX(e.clientX); });
-  progressWrap.addEventListener('mousedown', function(e) { isSeeking = true; seekByClientX(e.clientX); });
-  document.addEventListener('mousemove', function(e) { if (isSeeking && container.isConnected) seekByClientX(e.clientX); });
-  document.addEventListener('mouseup', function() { isSeeking = false; });
-  progressWrap.addEventListener('touchstart', function(e) { isSeeking = true; seekByClientX(e.touches[0].clientX); }, { passive: true });
-  progressWrap.addEventListener('touchmove', function(e) { if (isSeeking && container.isConnected) seekByClientX(e.touches[0].clientX); }, { passive: true });
-  progressWrap.addEventListener('touchend', function() { isSeeking = false; });
+  progressWrap.addEventListener('pointerdown', function(e) { isSeeking = true; seekByClientX(e.clientX); progressTrack.setPointerCapture(e.pointerId); });
+  progressWrap.addEventListener('pointermove', function(e) { if (isSeeking && container.isConnected) seekByClientX(e.clientX); });
+  progressWrap.addEventListener('pointerup', function() { isSeeking = false; });
+  progressWrap.addEventListener('pointercancel', function() { isSeeking = false; });
   controls.appendChild(progressWrap);
   // 总时长
   var durationEl = document.createElement('span');
@@ -905,26 +1105,179 @@ function createCustomAudioPlayer(url) {
   return container;
 }
 
+// ============ 自定义视频播放器 ============
+// 从线上部署版本恢复；修复：Pointer Capture 替代 document 监听（防泄漏）、playsInline（iOS 内联播放）
+function createCustomVideoPlayer(url) {
+  var container = document.createElement('div');
+  container.className = 'customVideoPlayer';
+  // 视频元素（preload='metadata' 加载首帧作为海报，点击后按需流式加载）
+  var video = document.createElement('video');
+  video.src = url;
+  video.preload = 'metadata';
+  video.className = 'videoEl';
+  video.muted = true;
+  video.playsInline = true; // iOS 内联播放
+  video.addEventListener('loadedmetadata', function() {
+    if (video.readyState >= 1) { video.currentTime = 0; }
+  });
+  container.appendChild(video);
+  // 播放按钮遮罩（首帧画面作为背景透过遮罩显示）
+  var playOverlay = document.createElement('div');
+  playOverlay.className = 'videoPlayOverlay';
+  playOverlay.innerHTML = '<span>▶</span>';
+  playOverlay.onclick = function(e) {
+    e.stopPropagation();
+    video.play();
+  };
+  container.appendChild(playOverlay);
+  // 自定义控制栏
+  var controls = document.createElement('div');
+  controls.className = 'videoControls';
+  // 播放/暂停
+  var playBtn = document.createElement('button');
+  playBtn.className = 'videoPlayBtn';
+  playBtn.textContent = '▶';
+  playBtn.onclick = function() { video.paused ? video.play() : video.pause(); };
+  controls.appendChild(playBtn);
+  // 当前时间
+  var currentTime = document.createElement('span');
+  currentTime.className = 'videoTime';
+  currentTime.textContent = '0:00';
+  controls.appendChild(currentTime);
+  // 进度条（Pointer Capture：拖拽事件绑定在元素上，随节点回收无泄漏）
+  var progressWrap = document.createElement('div');
+  progressWrap.className = 'videoProgress';
+  var progressTrack = document.createElement('div');
+  progressTrack.className = 'videoProgressTrack';
+  var progressBar = document.createElement('div');
+  progressBar.className = 'videoProgressBar';
+  progressTrack.appendChild(progressBar);
+  progressWrap.appendChild(progressTrack);
+  var isSeeking = false;
+  function seekByClientX(clientX) {
+    if (!video.duration) return;
+    var rect = progressTrack.getBoundingClientRect();
+    var ratio = (clientX - rect.left) / rect.width;
+    video.currentTime = Math.max(0, Math.min(ratio, 1)) * video.duration;
+  }
+  progressWrap.addEventListener('click', function(e) { seekByClientX(e.clientX); });
+  progressWrap.addEventListener('pointerdown', function(e) {
+    isSeeking = true;
+    seekByClientX(e.clientX);
+    progressTrack.setPointerCapture(e.pointerId); // 指针移出元素仍持续捕获
+  });
+  progressWrap.addEventListener('pointermove', function(e) {
+    if (isSeeking && container.isConnected) seekByClientX(e.clientX);
+  });
+  progressWrap.addEventListener('pointerup', function() { isSeeking = false; });
+  progressWrap.addEventListener('pointercancel', function() { isSeeking = false; });
+  controls.appendChild(progressWrap);
+  // 总时长
+  var durationEl = document.createElement('span');
+  durationEl.className = 'videoTime';
+  durationEl.textContent = '0:00';
+  controls.appendChild(durationEl);
+  // 音量控制
+  var volumeWrap = document.createElement('div');
+  volumeWrap.className = 'videoVolumeWrap';
+  var volumeBtn = document.createElement('button');
+  volumeBtn.className = 'videoVolumeBtn';
+  volumeBtn.textContent = '🔊';
+  var volumeSlider = document.createElement('input');
+  volumeSlider.type = 'range';
+  volumeSlider.className = 'videoVolumeSlider';
+  volumeSlider.min = '0';
+  volumeSlider.max = '1';
+  volumeSlider.step = '0.05';
+  volumeSlider.value = '1';
+  function updateVolumeIcon() {
+    if (video.muted || video.volume === 0) volumeBtn.textContent = '🔇';
+    else if (video.volume < 0.5) volumeBtn.textContent = '🔉';
+    else volumeBtn.textContent = '🔊';
+  }
+  volumeBtn.onclick = function() {
+    if (video.muted || video.volume === 0) {
+      video.muted = false;
+      video.volume = parseFloat(volumeSlider.value) || 1;
+      volumeSlider.value = video.volume;
+    } else if (volumeSlider.classList.contains('expanded')) {
+      volumeSlider.classList.remove('expanded');
+    } else {
+      volumeSlider.classList.add('expanded');
+    }
+  };
+  volumeSlider.oninput = function() {
+    video.volume = parseFloat(volumeSlider.value);
+    video.muted = false;
+    updateVolumeIcon();
+  };
+  volumeWrap.appendChild(volumeBtn);
+  volumeWrap.appendChild(volumeSlider);
+  controls.appendChild(volumeWrap);
+  // 全屏按钮
+  var fsBtn = document.createElement('button');
+  fsBtn.className = 'videoFsBtn';
+  fsBtn.textContent = '⛶';
+  fsBtn.title = '全屏';
+  fsBtn.onclick = function() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else if (container.requestFullscreen) {
+      container.requestFullscreen();
+    } else if (video.webkitEnterFullscreen) {
+      video.webkitEnterFullscreen();
+    }
+  };
+  controls.appendChild(fsBtn);
+  container.appendChild(controls);
+  // 视频事件
+  video.addEventListener('loadedmetadata', function() { durationEl.textContent = formatTime(video.duration); });
+  video.addEventListener('timeupdate', function() {
+    if (!isSeeking && video.duration) progressBar.style.width = (video.currentTime / video.duration * 100) + '%';
+    currentTime.textContent = formatTime(video.currentTime);
+  });
+  video.addEventListener('play', function() { playBtn.textContent = '⏸'; playOverlay.style.display = 'none'; });
+  video.addEventListener('pause', function() { playBtn.textContent = '▶'; });
+  video.addEventListener('ended', function() { playBtn.textContent = '▶'; progressBar.style.width = '0%'; currentTime.textContent = '0:00'; playOverlay.style.display = ''; });
+  video.addEventListener('volumechange', updateVolumeIcon);
+  video.addEventListener('error', function() { playBtn.textContent = '⚠️'; playBtn.title = '视频加载失败'; });
+  return container;
+}
+
 // ============ 发送消息 ============
+let isSending = false; // 防重入：发送期间 Enter/按钮连点不重复请求
 async function sendText() {
   const content = textInput.value.trim();
-  if (!content) return;
+  if (!content || isSending) return;
+  isSending = true;
   sendBtn.disabled = true;
   sendBtn.textContent = '...';
-  textInput.value = '';
-  textInput.style.height = '44px';
-  updateSendButtonState();
+  // 失败时恢复输入内容（仅当用户没有重新输入）
+  const restoreInput = () => {
+    if (!textInput.value.trim()) {
+      textInput.value = content;
+      textInput.style.height = '44px';
+      textInput.dispatchEvent(new Event('input'));
+    }
+    updateSendButtonState();
+  };
   try {
     const res = await fetch(API_ROOT + '/send', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({room:currentRoom,type:'text',content}) });
     const data = await safeJson(res);
     if (!res.ok || !data || !data.message) {
-      if (res.status === 429) { showToast('发送过于频繁，请稍后再试', 'warning'); return; }
+      if (res.status === 429) { showToast('发送过于频繁，请稍后再试', 'warning'); restoreInput(); return; }
       throw new Error(data ? data.error : '发送失败');
+    }
+    // 成功才清空；仅当输入未被用户改动（避免吞掉发送期间的新输入）
+    if (textInput.value.trim() === content) {
+      textInput.value = '';
+      textInput.style.height = '44px';
+      updateSendButtonState();
     }
     // 本地渲染发送的消息（WS 广播也会推送，按 data-id 幂等去重，先到先得）
     renderSingleMessage(data.message);
-  } catch(e) { showToast('发送失败: ' + e.message, 'error'); }
-  finally { sendBtn.textContent = '发送'; updateSendButtonState(); }
+  } catch(e) { restoreInput(); showToast('发送失败: ' + e.message, 'error'); }
+  finally { isSending = false; sendBtn.textContent = '发送'; updateSendButtonState(); }
 }
 function updateSendButtonState() {
   sendBtn.disabled = textInput.value.trim().length === 0;
@@ -935,7 +1288,7 @@ function autoGrowTextarea() {
 }
 sendBtn.onclick = sendText;
 textInput.oninput = () => { updateSendButtonState(); autoGrowTextarea(); };
-textInput.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (textInput.value.trim()) sendText(); } };
+textInput.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (textInput.value.trim()) sendText(); } }; // isComposing：输入法选词确认不误发送
 updateSendButtonState(); autoGrowTextarea();
 
 // ============ 图片粘贴 ============
@@ -988,13 +1341,15 @@ messagesEl.addEventListener('scroll', async () => {
       doneEl.textContent = '—— 没有更多消息了 ——';
       messagesEl.insertBefore(doneEl, messagesEl.firstChild);
     } else {
-      // 在顶部插入新消息
+      // 在顶部插入新消息（批量渲染暂停朗读）
+      messagesEl.setAttribute('aria-live', 'off');
       const fragment = document.createDocumentFragment();
       msgs.forEach(m => {
         const el = createMessageElement(m);
         if (el) fragment.appendChild(el);
       });
       messagesEl.insertBefore(fragment, messagesEl.firstChild);
+      messagesEl.setAttribute('aria-live', 'polite');
       // 保持滚动位置
       const newScrollHeight = messagesEl.scrollHeight;
       messagesEl.scrollTop = newScrollHeight - oldScrollHeight + oldScrollTop;
@@ -1020,20 +1375,8 @@ function getOldestTimestamp() {
 function createMessageElement(m) {
   const dataId = String(m.id || m.file_id || '');
   if (!dataId) return null;
-  // 创建临时容器，避免直接操作 DOM
-  const temp = document.createElement('div');
-  temp.style.display = 'none';
-  messagesEl.appendChild(temp);
-  const oldAppend = messagesEl.appendChild.bind(messagesEl);
-  // 临时替换 appendChild 以捕获元素
-  messagesEl.appendChild = (el) => {
-    temp.appendChild(el);
-    return el;
-  };
-  const result = renderSingleMessage(m);
-  messagesEl.appendChild = oldAppend;
-  temp.remove();
-  return result || null;
+  // renderSingleMessage 支持 append:false 返回游离节点（不再劫持 messagesEl.appendChild）
+  return renderSingleMessage(m, { append: false });
 }
 
 // ============ 文件上传 ============
@@ -1094,10 +1437,11 @@ async function handleFiles(files) {
       showToast('上传失败: ' + file.name, 'error');
       // 清理 R2 临时分块
       try { await fetch(API_ROOT + '/upload-cleanup', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({room:uploadRoom,fileId}) }); } catch(_) {}
-      await deleteMessage(fileId, uploadRoom);
+      await deleteMessage(fileId, uploadRoom, roomPasswords[uploadRoom] || null);
     }
   }
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  // 上传完成不强制跳底（用户可能在查看历史）
+  if (isNearBottom()) messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 async function sendPlaceholderMessage(id, name, size, room) {
   const res = await fetch(API_ROOT + '/send', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({room,type:'placeholder-file',id,name,size}) });
@@ -1105,10 +1449,10 @@ async function sendPlaceholderMessage(id, name, size, room) {
   if (!res.ok || !data || !data.message) throw new Error('占位符发送失败');
   renderSingleMessage(data.message);
 }
-async function deleteMessage(id, room) {
+async function deleteMessage(id, room, passwordHash) {
   const el = messagesEl.querySelector('[data-id="'+id+'"]');
   if (el && currentRoom === room) el.remove();
-  await fetch(API_ROOT + '/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({room,id}) });
+  await fetch(API_ROOT + '/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({room,id,passwordHash}) });
 }
 async function uploadFileInChunks(file, fileId, room) {
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
@@ -1205,29 +1549,37 @@ window.addEventListener('focus', () => {
 function showImageViewer(url, name) {
   const overlay = document.createElement('div');
   overlay.className = 'imgViewerOverlay';
-  overlay.innerHTML = '<div class="imgViewerClose">✕</div><img class="imgViewerImg" src="' + url + '" alt="' + escapeHtml(name || '') + '" />';
+  overlay.innerHTML = '<div class="imgViewerLoading">加载中...</div><div class="imgViewerClose" aria-label="关闭">✕</div>' +
+    '<img class="imgViewerImg" src="' + url + '" alt="' + escapeHtml(name || '') + '" />';
   document.body.appendChild(overlay);
-  const close = () => overlay.remove();
-  overlay.onclick = close;
+  const img = overlay.querySelector('.imgViewerImg');
+  const loadingEl = overlay.querySelector('.imgViewerLoading');
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const close = () => {
+    document.removeEventListener('keydown', onKey); // 幂等：无论何种方式关闭都移除监听
+    overlay.remove();
+  };
+  overlay.onclick = (e) => { if (e.target === overlay) close(); }; // 仅点遮罩关闭（与 modal 行为一致）
   overlay.querySelector('.imgViewerClose').onclick = close;
-  // ESC 关闭
-  const onKey = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
+  img.onload = () => loadingEl.remove(); // 加载完成移除占位
+  img.onerror = () => { loadingEl.textContent = '图片加载失败'; };
+  img.decoding = 'async';
   document.addEventListener('keydown', onKey);
 }
 
 // ============ 搜索和刷新 ============
 let searchTimer = null;
-searchInput.oninput = () => {
+let searchComposing = false; // 输入法组合中不触发搜索（避免半截拼音打接口）
+const triggerSearch = () => {
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
-    if (!searchInput.value.trim()) {
-      // 搜索框清空，自动恢复全部消息
-      fetchMessages(true);
-    } else {
-      fetchMessages(true);
-    }
+    if (searchComposing) return;
+    fetchMessages(true);
   }, 300);
 };
+searchInput.addEventListener('compositionstart', () => { searchComposing = true; });
+searchInput.addEventListener('compositionend', () => { searchComposing = false; triggerSearch(); });
+searchInput.oninput = () => { if (!searchComposing) triggerSearch(); };
 refreshBtn.onclick = () => fetchMessages(true);
 
 // ============ 初始化 ============
@@ -1252,7 +1604,7 @@ async function initApp() {
   await fetchMessages(true);
   connectWebSocket();
 }
-initApp();
+initApp().catch(e => { showToast('初始化失败: ' + e.message, 'error'); });
 </script>
 </body>
 </html>
