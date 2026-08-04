@@ -1,0 +1,42 @@
+# $schema = "./node_modules/wrangler/config-schema.json"
+name = "yimo-chat"
+main = "src/index.js"
+compatibility_date = "2026-04-07"
+compatibility_flags = ["nodejs_compat"]
+
+# 自定义域名
+routes = [
+  { pattern = "chat.yimo.qzz.io/*", zone_name = "yimo.qzz.io" }
+]
+
+# 日志配置
+[observability]
+logs.enabled = true
+logs.invocation_logs = true
+
+# D1 数据库
+[[d1_databases]]
+binding = "DB"
+database_name = "yimo-chat-db"
+database_id = "fbe24be3-b1fc-4afd-a96f-b0698713e3ac"
+
+# R2 存储桶
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "yimo-chat-files"
+
+# KV 命名空间（用于频率限制 + 业务缓存）
+# 免费额度：100K 读取/天，1K 写入/天，1GB 存储
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "your-kv-namespace-id"
+
+# Durable Objects
+[[durable_objects.bindings]]
+name = "CHAT_ROOM"
+class_name = "ChatRoomDO"
+
+# Durable Objects 迁移配置
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["ChatRoomDO"]

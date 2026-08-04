@@ -1,0 +1,18 @@
+{
+  "name": "yimo-chat",
+  "version": "2.0.0",
+  "private": true,
+  "description": "逸陌聊天室 - 基于 Cloudflare Worker 的实时聊天应用",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create yimo-chat-db",
+    "db:init": "wrangler d1 execute yimo-chat-db --file=schema.sql",
+    "db:init:local": "wrangler d1 execute yimo-chat-db --local --file=schema.sql",
+    "r2:create": "wrangler r2 bucket create yimo-chat-files",
+    "kv:create": "wrangler kv namespace create RATE_LIMIT"
+  },
+  "devDependencies": {
+    "wrangler": "^4.96.0"
+  }
+}
