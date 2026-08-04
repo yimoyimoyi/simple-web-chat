@@ -1,5 +1,5 @@
 # 自动部署：push 到 main 后通过 wrangler-action 部署到 Cloudflare Workers
-# 参照 mypixiv 项目的部署配置；CLOUDFLARE_API_TOKEN 需在仓库 Secrets 中配置
+# 部署配置；CLOUDFLARE_API_TOKEN 需在仓库 Secrets 中配置
 name: Deploy Worker
 
 on:
