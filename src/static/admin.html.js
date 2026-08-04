@@ -159,7 +159,8 @@ function enterAdmin(data) {
   renderRooms(data);
 }
 function renderRooms(data) {
-  const rooms = (data && data.ok && Array.isArray(data.data)) ? data.data : [];
+  // admin API 对数组数据返回裸数组（okResponse 对 Array 直接返回），兼容两种结构
+  const rooms = Array.isArray(data) ? data : ((data && data.data) || []);
   const t = $('#roomsTable');
   if (!rooms.length) { t.innerHTML = '<tr><td class="muted">暂无房间</td></tr>'; return; }
   t.innerHTML = '<tr><th>房间</th><th>密码</th><th>消息</th><th>文件</th><th>大小</th><th>创建</th><th>操作</th></tr>' +
@@ -204,7 +205,7 @@ async function loadMessages(room) {
   if (!data) return;
   viewingRoom = room;
   $('#msgTitle').textContent = '消息 - ' + room;
-  const msgs = (data.ok && Array.isArray(data.data)) ? data.data : [];
+  const msgs = Array.isArray(data) ? data : ((data && data.data) || []);
   const list = $('#msgList');
   list.innerHTML = msgs.length ? msgs.map(m => {
     const tag = m.type === 'image-ref' ? '<span class="msg-tag">🖼️ 图片</span>'
