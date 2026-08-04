@@ -29,7 +29,7 @@ bucket_name = "yimo-chat-files"
 # 免费额度：100K 读取/天，1K 写入/天，1GB 存储
 [[kv_namespaces]]
 binding = "RATE_LIMIT"
-id = "your-kv-namespace-id"
+id = "7bb37951e3e9441b93bdf31fffda9934"
 
 # Durable Objects
 [[durable_objects.bindings]]
