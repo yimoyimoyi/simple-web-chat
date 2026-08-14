@@ -83,6 +83,19 @@ html, body { height: 100%; }
   line-height: 1.6;
 }
 
+/* 视觉隐藏但保留读屏可访问（用于 aria-live 状态文本） */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* 图片查看器加载占位 */
 .imgViewerLoading {
   position: absolute;
@@ -139,6 +152,11 @@ body {
 #roomList { overflow-y: auto; flex: 1; }
 #roomList::-webkit-scrollbar { width: 4px; }
 #roomList::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 2px; }
+/* Firefox 标准属性（Chrome 121+/Safari 18.2+ 同时生效，不兼容浏览器忽略） */
+#roomList, #messages {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0,0,0,0.15) transparent;
+}
 
 .roomItem {
   display: flex;
@@ -186,26 +204,56 @@ body {
   align-items: center;
   flex-shrink: 0;
 }
+.searchWrap {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
 #searchInput {
   flex: 1;
-  padding: 9px 14px;
+  min-width: 0;
+  padding: 9px 30px 9px 14px; /* 右侧留出清除按钮空间 */
   border-radius: 10px;
   border: 1.5px solid var(--input-border);
   background: var(--input);
   color: var(--input-text);
   outline: none;
   font-size: 13px;
-  min-width: 0;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 #searchInput:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(67,97,238,0.1);
 }
+/* 搜索清除按钮（值非空时显示） */
+.searchClear {
+  position: absolute;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: background 0.15s, color 0.15s;
+}
+.searchClear:hover { background: var(--input-border); color: var(--text); }
+.searchClear[hidden] { display: none; }
 
-#topBar button {
-  background-color: var(--btn-bg);
-  color: var(--btn-text);
+/* 顶栏次要按钮：幽灵样式，与"发送"实心主按钮拉开视觉层级
+   用子选择器 > 限定直接子元素，避免覆盖 .searchWrap 内的清除按钮 */
+#topBar > button {
+  background: transparent;
+  color: var(--text);
   border: none;
   border-radius: 8px;
   padding: 8px 14px;
@@ -214,9 +262,10 @@ body {
   transition: background 0.15s, transform 0.1s;
   flex-shrink: 0;
   white-space: nowrap;
+  box-shadow: inset 0 0 0 1px var(--input-border); /* 模拟边框，不改变按钮高度 */
 }
-#topBar button:hover { background-color: var(--btn-bg-hover); }
-#topBar button:active { transform: scale(0.97); }
+#topBar > button:hover { background: var(--input); box-shadow: inset 0 0 0 1px var(--input-border); }
+#topBar > button:active { transform: scale(0.97); }
 
 /* ============ 消息区域 ============ */
 #messages {
@@ -243,6 +292,30 @@ body {
   color: var(--muted);
   font-size: 12px;
   opacity: 0.6;
+}
+
+/* 空状态（空房间 / 无搜索结果） */
+.emptyState {
+  margin: auto;
+  text-align: center;
+  color: var(--muted);
+  padding: 32px 24px;
+  user-select: none;
+}
+.emptyState .emptyIcon { font-size: 46px; margin-bottom: 14px; opacity: 0.9; }
+.emptyState .emptyTitle { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+.emptyState .emptyHint { font-size: 13px; line-height: 1.7; }
+
+/* 日期分隔线（跨天消息分组） */
+.dateDivider {
+  align-self: center;
+  margin: 8px 0 0;
+  padding: 3px 12px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--input);
+  border-radius: 999px;
+  box-shadow: var(--bubble-shadow);
 }
 
 /* ============ 消息气泡 ============ */
@@ -473,6 +546,7 @@ body {
   cursor: default;
   user-select: none;
 }
+/* button 语义化：重置默认样式（border/padding/字体） */
 .imgViewerClose {
   position: fixed;
   top: 16px;
@@ -481,16 +555,21 @@ body {
   height: 36px;
   background: rgba(255,255,255,0.15);
   color: #fff;
+  border: none;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 18px;
+  line-height: 1;
+  padding: 0;
+  font-family: inherit;
   cursor: pointer;
   transition: background 0.15s;
   z-index: 10001;
 }
 .imgViewerClose:hover { background: rgba(255,255,255,0.3); }
+.imgViewerClose:focus-visible { background: rgba(255,255,255,0.3); } /* 键盘焦点与 hover 视觉一致 */
 
 /* ============ 进度条 ============ */
 .progressWrap {
@@ -770,8 +849,8 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* 顶栏：左侧留出侧边栏按钮空间 */
   #topBar { padding: 10px 12px 10px 52px; }
-  #topBar button { padding: 8px 10px; font-size: 13px; }
-  #topBar button span { display: none; }
+  #topBar > button { padding: 8px 10px; font-size: 13px; }
+  #topBar > button span { display: none; }
   #searchInput { font-size: 14px; }
 
   /* 消息区域 */

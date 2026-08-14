@@ -23,6 +23,8 @@ const toastEl = $('#toast');
 const sidebarToggle = $('#sidebarToggle');
 const sidebarOverlay = $('#sidebarOverlay');
 const roomsPanel = $('#rooms');
+const searchClearBtn = $('#searchClear');
+const connectionStatus = $('#connectionStatus');
 
 // 状态
 let currentRoom = 'default';
@@ -38,6 +40,27 @@ let roomLastActive = {}; // 房间最后活跃时间
 // 检查是否在底部附近
 function isNearBottom() {
   return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 100;
+}
+
+// 日期分组标签：今天 / 昨天 / 星期X / 月日 / 年月日
+function dateLabel(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const now = new Date();
+  const dayStart = t => new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
+  const diff = Math.round((dayStart(now) - dayStart(d)) / 86400000);
+  if (diff <= 0) return '今天';
+  if (diff === 1) return '昨天';
+  if (diff < 7) return '星期' + '日一二三四五六'[d.getDay()];
+  if (d.getFullYear() === now.getFullYear()) return (d.getMonth() + 1) + '月' + d.getDate() + '日';
+  return d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() + '日';
+}
+function makeDivider(label) {
+  const el = document.createElement('div');
+  el.className = 'dateDivider';
+  el.setAttribute('role', 'separator');
+  el.textContent = label;
+  return el;
 }
 
 const urlParams = new URLSearchParams(window.location.search);
@@ -109,8 +132,11 @@ async function sha256(str) {
 }
 
 // ============ 主题 ============
+// 首次访问跟随系统偏好；用户手动切换后存 localStorage 固化
 let theme = 'light';
-try { theme = localStorage.getItem('theme') || 'light'; } catch(e) {}
+try {
+  theme = localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+} catch(e) {}
 function updateTheme(t) {
   theme = t;
   try { localStorage.setItem('theme', theme); } catch(e) {}
@@ -184,15 +210,25 @@ function showModal(title, fields, onSubmit, onCancel) {
   overlay.innerHTML = '<div class="modalBox">' +
     '<h3 id="modalTitle_' + mid + '">' + escapeHtml(title) + '</h3>' +
     fields.map(f => '<input type="' + (f.type || 'text') + '" placeholder="' + escapeHtml(f.placeholder || '') + '" id="modal_' + mid + '_' + f.name + '" />').join('') +
-    '<div class="modalError" id="modalError_' + mid + '"></div>' +
+    '<div class="modalError" id="modalError_' + mid + '" role="alert"></div>' +
     '<div class="modalActions"><button class="modalCancel">取消</button><button class="modalConfirm">确定</button></div>' +
     '</div>';
   document.body.appendChild(overlay);
 
   // 记录焦点来源，关闭时恢复（键盘可达性）
   const prevFocus = document.activeElement;
-  // 统一 Esc 处理（无论焦点在输入框还是按钮上）
-  const escHandler = (e) => { if (e.key === 'Escape') close(true); };
+  // 统一 Esc 处理（无论焦点在输入框还是按钮上）+ Tab 焦点陷阱（aria-modal 承诺模态，焦点不得逃逸）
+  const escHandler = (e) => {
+    if (e.key === 'Escape') close(true);
+    else if (e.key === 'Tab') {
+      const focusables = overlay.querySelectorAll('button, input, select, textarea, [tabindex]:not([tabindex="-1"])');
+      if (!focusables.length) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  };
   document.addEventListener('keydown', escHandler);
   // 关闭时回调 onCancel（防止 await 永久挂起）
   const close = (cancelled) => {
@@ -235,10 +271,14 @@ function showModal(title, fields, onSubmit, onCancel) {
  */
 function showConfirm(title, message, confirmText = '确定') {
   return new Promise(resolve => {
+    const mid = 'confirm' + (++modalCounter);
     const overlay = document.createElement('div');
     overlay.className = 'modalOverlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', mid);
     overlay.innerHTML = '<div class="modalBox">' +
-      '<h3>' + escapeHtml(title) + '</h3>' +
+      '<h3 id="' + mid + '">' + escapeHtml(title) + '</h3>' +
       '<div class="confirmMsg">' + escapeHtml(message) + '</div>' +
       '<div class="modalActions"><button class="modalCancel">取消</button><button class="modalConfirm danger">' + escapeHtml(confirmText) + '</button></div>' +
       '</div>';
@@ -249,6 +289,8 @@ function showConfirm(title, message, confirmText = '确定') {
     overlay.addEventListener('click', e => { if (e.target === overlay) done(false); });
     overlay.querySelector('.modalConfirm').onclick = () => done(true);
     document.addEventListener('keydown', esc);
+    // 打开时聚焦确定按钮（危险操作默认落在确认上；键盘用户可达）
+    overlay.querySelector('.modalConfirm').focus();
   });
 }
 
@@ -309,6 +351,7 @@ function connectWebSocket(backfillOnOpen = false) {
       wsConnectedRoom = currentRoom;
       if (wsDisconnectTimer) { clearTimeout(wsDisconnectTimer); wsDisconnectTimer = null; }
       if (connectionBar) connectionBar.className = '';
+      if (connectionStatus) connectionStatus.textContent = '已连接';
       startHeartbeat(); // 连接建立后启动心跳
       // 重连成功：补拉断线期间的消息（保留滚动位置）
       if (wsBackfillPending) {
@@ -323,7 +366,7 @@ function connectWebSocket(backfillOnOpen = false) {
         var msgRoom = data.room || data.message?.room;
         if (msgRoom && msgRoom !== currentRoom) return;
         if (data.type === 'new-message') { renderSingleMessage(data.message); if (isNearBottom()) messagesEl.scrollTop = messagesEl.scrollHeight; }
-        else if (data.type === 'delete-message') { const el = messagesEl.querySelector('[data-id="'+data.messageId+'"]'); if (el) el.remove(); }
+        else if (data.type === 'delete-message') { const el = messagesEl.querySelector('[data-id="'+data.messageId+'"]'); if (el) removeMessageEl(el); }
         else if (data.type === 'edit-message') {
           const el = messagesEl.querySelector('[data-id="'+data.message.id+'"]');
           if (el) { el.innerHTML = ''; renderSingleMessage(data.message); }
@@ -343,6 +386,7 @@ function connectWebSocket(backfillOnOpen = false) {
           if (!wsConnected) {
             showToast('网络连接不稳定', 'error');
             if (connectionBar) connectionBar.className = 'disconnected';
+            if (connectionStatus) connectionStatus.textContent = '网络连接断开，正在重连';
           }
         }, 5000);
       }
@@ -490,10 +534,12 @@ async function fetchMessages(force, opts = {}) {
       messagesEl.setAttribute('aria-live', 'off');
       messagesEl.innerHTML = '';
       noMoreHistory = false;
-      renderMessages(msgs);
+      renderMessages(msgs, () => {
+        // 全部渲染完成后再定位滚动，避免分批渲染期间误判"离底"
+        if (force || isInitialLoad) { messagesEl.scrollTop = messagesEl.scrollHeight; isInitialLoad = false; }
+        else if (opts.preserveScroll) messagesEl.scrollTop = nearBottom ? messagesEl.scrollHeight : scrollTop;
+      });
       messagesEl.setAttribute('aria-live', 'polite');
-      if (force || isInitialLoad) { messagesEl.scrollTop = messagesEl.scrollHeight; isInitialLoad = false; }
-      else if (opts.preserveScroll) messagesEl.scrollTop = nearBottom ? messagesEl.scrollHeight : scrollTop;
     }
   } catch(e) { if (room === currentRoom) messagesEl.innerHTML = ''; }
 }
@@ -704,19 +750,78 @@ function renderSingleMessage(m, opts = {}) {
   // 消息数据入 WeakMap（事件委托取用；元素移除时自动 GC）
   msgMap.set(wrapper, m);
 
-  if (isNew && append) messagesEl.appendChild(wrapper);
+  if (isNew && append) {
+    const emptyEl = messagesEl.querySelector('.emptyState');
+    if (emptyEl) emptyEl.remove();
+    // 与前一条消息跨天时插入日期分隔线
+    const lastEl = messagesEl.lastElementChild;
+    const lastMsg = lastEl && lastEl.classList.contains('message') ? lastEl : null;
+    if (lastMsg) {
+      const prevLabel = dateLabel(+(lastMsg.getAttribute('data-ts') || 0));
+      const curLabel = dateLabel(m.timestamp);
+      if (prevLabel && curLabel && prevLabel !== curLabel) messagesEl.appendChild(makeDivider(curLabel));
+    }
+    messagesEl.appendChild(wrapper);
+  }
   return wrapper;
 }
 
-function renderMessages(msgs) {
+function renderMessages(msgs, onDone) {
   const batchSize = 20;
   let idx = 0;
+  let lastLabel = null;
   function next() {
     const end = Math.min(idx + batchSize, msgs.length);
-    for (; idx < end; idx++) renderSingleMessage(msgs[idx]);
+    for (; idx < end; idx++) {
+      const m = msgs[idx];
+      // 批内状态机：与前一批最后一条跨天时先插日期线（batch 边界用 rAF 断点，不能依赖 DOM 相邻性）
+      const label = dateLabel(m.timestamp);
+      if (label && label !== lastLabel) {
+        lastLabel = label;
+        messagesEl.appendChild(makeDivider(label));
+      }
+      renderSingleMessage(m);
+    }
     if (idx < msgs.length) requestAnimationFrame(next);
+    else { updateEmptyState(); if (onDone) onDone(); }
   }
   next();
+}
+
+// 空状态（无消息 / 搜索无结果）
+function updateEmptyState() {
+  let empty = messagesEl.querySelector('.emptyState');
+  const hasMsgs = !!messagesEl.querySelector('.message[data-id]');
+  if (hasMsgs) { if (empty) empty.remove(); return; }
+  if (!empty) {
+    empty = document.createElement('div');
+    empty.className = 'emptyState';
+    messagesEl.appendChild(empty);
+  }
+  if (searchInput.value.trim()) {
+    empty.innerHTML = '<div class="emptyIcon">🔍</div><div class="emptyTitle">没有找到匹配的消息</div><div class="emptyHint">换个关键词试试吧</div>';
+  } else {
+    empty.innerHTML = '<div class="emptyIcon">💬</div><div class="emptyTitle">这里还没有消息</div><div class="emptyHint">发送第一条消息开始聊天吧<br>也可以直接粘贴图片或拖拽文件上传</div>';
+  }
+}
+
+// 删除消息节点并修复日期分隔线、空状态
+function removeMessageEl(el) {
+  const prev = el.previousElementSibling;
+  const next = el.nextElementSibling;
+  el.remove();
+  if (prev && prev.classList.contains('dateDivider')) {
+    const above = prev.previousElementSibling;
+    const aboveMsg = above && above.classList.contains('message') ? above : null;
+    const nextMsg = next && next.classList.contains('message') ? next : null;
+    if (!aboveMsg || !nextMsg) prev.remove();
+    else {
+      const a = aboveMsg.getAttribute('data-ts');
+      const b = nextMsg.getAttribute('data-ts');
+      if (!a || !b || dateLabel(+a) === dateLabel(+b)) prev.remove();
+    }
+  }
+  updateEmptyState();
 }
 
 // ============ 消息编辑 ============
@@ -850,7 +955,7 @@ function showContextMenu(wrapper, m, x, y) {
       });
       const data = await safeJson(res);
       if (!res.ok || !data || !data.ok) throw new Error(data ? data.error : '删除失败');
-      wrapper.remove();
+      removeMessageEl(wrapper);
     } catch(e) { showToast('删除失败: ' + e.message, 'error'); }
   }});
   showContextMenuAt(items, x, y);
@@ -1343,8 +1448,22 @@ messagesEl.addEventListener('scroll', async () => {
     } else {
       // 在顶部插入新消息（批量渲染暂停朗读）
       messagesEl.setAttribute('aria-live', 'off');
+      const firstMsg = messagesEl.querySelector('.message[data-id]');
+      const startLabel = firstMsg ? dateLabel(+(firstMsg.getAttribute('data-ts') || 0)) : '';
+      const lastBatchLabel = msgs.length ? dateLabel(msgs[msgs.length - 1].timestamp) : '';
+      // 新批次与旧顶部消息同日：旧顶部的日期分隔线移交给新批次，避免重复
+      if (startLabel && lastBatchLabel === startLabel &&
+          firstMsg.previousElementSibling && firstMsg.previousElementSibling.classList.contains('dateDivider')) {
+        firstMsg.previousElementSibling.remove();
+      }
       const fragment = document.createDocumentFragment();
+      let lastLabel = startLabel;
       msgs.forEach(m => {
+        const label = dateLabel(m.timestamp);
+        if (label && label !== lastLabel) {
+          lastLabel = label;
+          fragment.appendChild(makeDivider(label));
+        }
         const el = createMessageElement(m);
         if (el) fragment.appendChild(el);
       });
@@ -1451,7 +1570,7 @@ async function sendPlaceholderMessage(id, name, size, room) {
 }
 async function deleteMessage(id, room, passwordHash) {
   const el = messagesEl.querySelector('[data-id="'+id+'"]');
-  if (el && currentRoom === room) el.remove();
+  if (el && currentRoom === room) removeMessageEl(el);
   await fetch(API_ROOT + '/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({room,id,passwordHash}) });
 }
 async function uploadFileInChunks(file, fileId, room) {
@@ -1549,28 +1668,46 @@ window.addEventListener('focus', () => {
 function showImageViewer(url, name) {
   const overlay = document.createElement('div');
   overlay.className = 'imgViewerOverlay';
-  overlay.innerHTML = '<div class="imgViewerLoading">加载中...</div><div class="imgViewerClose" aria-label="关闭">✕</div>' +
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', '图片查看');
+  overlay.innerHTML = '<div class="imgViewerLoading">加载中...</div><button type="button" class="imgViewerClose" aria-label="关闭">✕</button>' +
     '<img class="imgViewerImg" src="' + url + '" alt="' + escapeHtml(name || '') + '" />';
   document.body.appendChild(overlay);
   const img = overlay.querySelector('.imgViewerImg');
   const loadingEl = overlay.querySelector('.imgViewerLoading');
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  // 记录焦点来源，关闭时恢复（与 showModal 先例一致）
+  const prevFocus = document.activeElement;
+  const closeBtn = overlay.querySelector('.imgViewerClose');
+  const onKey = (e) => {
+    if (e.key === 'Escape') close();
+    else if (e.key === 'Tab') { e.preventDefault(); closeBtn.focus(); } // 焦点陷阱：查看器仅一个可聚焦元素，Tab 循环回自身
+  };
   const close = () => {
     document.removeEventListener('keydown', onKey); // 幂等：无论何种方式关闭都移除监听
     overlay.remove();
+    if (prevFocus && prevFocus.focus) prevFocus.focus();
   };
   overlay.onclick = (e) => { if (e.target === overlay) close(); }; // 仅点遮罩关闭（与 modal 行为一致）
-  overlay.querySelector('.imgViewerClose').onclick = close;
+  closeBtn.onclick = close;
   img.onload = () => loadingEl.remove(); // 加载完成移除占位
   img.onerror = () => { loadingEl.textContent = '图片加载失败'; };
   img.decoding = 'async';
   document.addEventListener('keydown', onKey);
+  // 打开时聚焦关闭按钮（键盘用户可达）
+  closeBtn.focus();
 }
 
 // ============ 搜索和刷新 ============
 let searchTimer = null;
 let searchComposing = false; // 输入法组合中不触发搜索（避免半截拼音打接口）
+// 清除按钮显隐：值非空时显示
+function updateSearchClear() {
+  if (!searchClearBtn) return;
+  searchClearBtn.hidden = !searchInput.value.trim();
+}
 const triggerSearch = () => {
+  updateSearchClear();
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     if (searchComposing) return;
@@ -1580,7 +1717,14 @@ const triggerSearch = () => {
 searchInput.addEventListener('compositionstart', () => { searchComposing = true; });
 searchInput.addEventListener('compositionend', () => { searchComposing = false; triggerSearch(); });
 searchInput.oninput = () => { if (!searchComposing) triggerSearch(); };
+if (searchClearBtn) searchClearBtn.onclick = () => {
+  searchInput.value = '';
+  updateSearchClear();
+  fetchMessages(true); // 清空后立即重置，无需 debounce
+  searchInput.focus();
+};
 refreshBtn.onclick = () => fetchMessages(true);
+updateSearchClear(); // 初始状态（刷新页面后输入框可能保留值）
 
 // ============ 初始化 ============
 async function initApp() {

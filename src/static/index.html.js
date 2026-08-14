@@ -12,6 +12,16 @@ export const HTML_HEAD = `<!doctype html>
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#1a1d28" media="(prefers-color-scheme: dark)">
+<script>
+/* 首屏防闪烁：body 脚本加载前先按偏好设置主题（手动选择 > 系统偏好） */
+(function(){
+  try {
+    var t = localStorage.getItem('theme');
+    var dark = t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    if (dark) document.documentElement.classList.add('dark');
+  } catch(e) {}
+})();
+</script>
 </head>`;
 
 export const HTML_BODY = `<body>
@@ -24,9 +34,12 @@ export const HTML_BODY = `<body>
   </div>
   <div id="main">
     <div id="topBar">
-      <input id="searchInput" placeholder="搜索消息..." aria-label="搜索消息" />
+      <div class="searchWrap">
+        <input id="searchInput" placeholder="搜索消息..." aria-label="搜索消息" />
+        <button id="searchClear" class="searchClear" aria-label="清除搜索" type="button" hidden>✕</button>
+      </div>
       <button id="toggleTheme" aria-label="切换主题">🌙</button>
-      <button id="refreshBtn" aria-label="刷新"><span>刷新</span> ♻️</button>
+      <button id="refreshBtn" aria-label="刷新" title="刷新"><span>刷新</span> ♻️</button>
     </div>
     <div id="messages" aria-live="polite"></div>
     <div id="inputArea">
@@ -40,6 +53,6 @@ export const HTML_BODY = `<body>
   </div>
 </div>
 <div id="dropOverlay">📂 释放文件以上传</div>
-<div id="connectionBar"></div>
-<div id="toast"></div>
+<div id="connectionBar" aria-live="assertive"><span class="sr-only" id="connectionStatus"></span></div>
+<div id="toast" aria-live="polite"></div>
 `;
