@@ -23,6 +23,10 @@ const toastEl = $('#toast');
 const sidebarToggle = $('#sidebarToggle');
 const sidebarOverlay = $('#sidebarOverlay');
 const roomsPanel = $('#rooms');
+const scrollBottomBtn = $('#scrollBottomBtn');
+const searchInfoEl = $('#searchInfo');
+const roomNameEl = $('#roomName');
+const roomSubtitleEl = $('#roomSubtitle');
 
 // 状态
 let currentRoom = 'default';
@@ -38,6 +42,33 @@ let roomLastActive = {}; // 房间最后活跃时间
 // 检查是否在底部附近
 function isNearBottom() {
   return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 100;
+}
+
+// 回到底部按钮显隐
+function updateScrollBtn() {
+  if (!scrollBottomBtn) return;
+  scrollBottomBtn.classList.toggle('show', !isNearBottom());
+}
+
+// 日期分组标签：今天 / 昨天 / 星期X / 月日 / 年月日
+function dateLabel(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const now = new Date();
+  const dayStart = t => new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
+  const diff = Math.round((dayStart(now) - dayStart(d)) / 86400000);
+  if (diff <= 0) return '今天';
+  if (diff === 1) return '昨天';
+  if (diff < 7) return '星期' + '日一二三四五六'[d.getDay()];
+  if (d.getFullYear() === now.getFullYear()) return (d.getMonth() + 1) + '月' + d.getDate() + '日';
+  return d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() + '日';
+}
+function makeDivider(label) {
+  const el = document.createElement('div');
+  el.className = 'dateDivider';
+  el.setAttribute('role', 'separator');
+  el.textContent = label;
+  return el;
 }
 
 const urlParams = new URLSearchParams(window.location.search);
@@ -322,8 +353,12 @@ function connectWebSocket(backfillOnOpen = false) {
         // 房间校验：丢弃不属于当前房间的消息
         var msgRoom = data.room || data.message?.room;
         if (msgRoom && msgRoom !== currentRoom) return;
-        if (data.type === 'new-message') { renderSingleMessage(data.message); if (isNearBottom()) messagesEl.scrollTop = messagesEl.scrollHeight; }
-        else if (data.type === 'delete-message') { const el = messagesEl.querySelector('[data-id="'+data.messageId+'"]'); if (el) el.remove(); }
+        if (data.type === 'new-message') {
+          renderSingleMessage(data.message);
+          if (isNearBottom()) messagesEl.scrollTop = messagesEl.scrollHeight;
+          updateScrollBtn();
+        }
+        else if (data.type === 'delete-message') { const el = messagesEl.querySelector('[data-id="'+data.messageId+'"]'); if (el) removeMessageEl(el); }
         else if (data.type === 'edit-message') {
           const el = messagesEl.querySelector('[data-id="'+data.message.id+'"]');
           if (el) { el.innerHTML = ''; renderSingleMessage(data.message); }
@@ -407,6 +442,12 @@ async function loadRooms() {
   if (!currentRoom || !rooms.includes(currentRoom)) currentRoom = 'default';
 }
 
+function setRoomTitle(room) {
+  if (roomNameEl) roomNameEl.textContent = room;
+  if (roomSubtitleEl) roomSubtitleEl.textContent = rooms.length + ' 个房间';
+  document.title = room + ' · 逸陌聊天室';
+}
+
 function renderRooms() {
   roomListEl.innerHTML = '';
   rooms.forEach(r => {
@@ -415,7 +456,7 @@ function renderRooms() {
     div.type = 'button';
     div.className = 'roomItem' + (r === currentRoom ? ' active' : '');
     if (r === currentRoom) div.setAttribute('aria-current', 'true');
-    div.innerHTML = '<span class="name">' + escapeHtml(r) + '</span>';
+    div.innerHTML = '<span class="hash">#</span><span class="name">' + escapeHtml(r) + '</span>';
     div.addEventListener('click', async () => {
       if (roomSuppressClick) { roomSuppressClick = false; return; } // 长按菜单触发，拦截误切房
       if (currentRoom === r) return;
@@ -444,6 +485,7 @@ function renderRooms() {
     // 绑定房间上下文菜单（长按/右键删除）
     attachRoomContextMenu(div, r);
   });
+  setRoomTitle(currentRoom);
 }
 
 // ============ 房间密码 ============
@@ -479,10 +521,12 @@ async function promptRoomPassword(room) {
 async function fetchMessages(force, opts = {}) {
   const room = currentRoom;
   try {
-    const kw = searchInput.value.trim().toLowerCase();
+    const kwDisplay = searchInput.value.trim();
+    const kw = kwDisplay.toLowerCase();
     const url = API_ROOT + '/messages?room=' + encodeURIComponent(room) + (kw ? '&keyword=' + encodeURIComponent(kw) : '');
     const res = await fetch(url);
     let msgs = await safeJson(res) || [];
+    updateSearchInfo(kwDisplay, msgs.length);
     if (force || room === currentRoom) {
       const scrollTop = messagesEl.scrollTop;
       const nearBottom = isNearBottom();
@@ -490,10 +534,13 @@ async function fetchMessages(force, opts = {}) {
       messagesEl.setAttribute('aria-live', 'off');
       messagesEl.innerHTML = '';
       noMoreHistory = false;
-      renderMessages(msgs);
+      renderMessages(msgs, () => {
+        // 全部渲染完成后再定位滚动，避免分批渲染期间误判“离底”而弹出回底按钮
+        if (force || isInitialLoad) { messagesEl.scrollTop = messagesEl.scrollHeight; isInitialLoad = false; }
+        else if (opts.preserveScroll) messagesEl.scrollTop = nearBottom ? messagesEl.scrollHeight : scrollTop;
+        updateScrollBtn();
+      });
       messagesEl.setAttribute('aria-live', 'polite');
-      if (force || isInitialLoad) { messagesEl.scrollTop = messagesEl.scrollHeight; isInitialLoad = false; }
-      else if (opts.preserveScroll) messagesEl.scrollTop = nearBottom ? messagesEl.scrollHeight : scrollTop;
     }
   } catch(e) { if (room === currentRoom) messagesEl.innerHTML = ''; }
 }
@@ -704,19 +751,77 @@ function renderSingleMessage(m, opts = {}) {
   // 消息数据入 WeakMap（事件委托取用；元素移除时自动 GC）
   msgMap.set(wrapper, m);
 
-  if (isNew && append) messagesEl.appendChild(wrapper);
+  if (isNew && append) {
+    const emptyEl = messagesEl.querySelector('.emptyState');
+    if (emptyEl) emptyEl.remove();
+    // 与前一条消息跨天时插入日期分隔线
+    const lastEl = messagesEl.lastElementChild;
+    const lastMsg = lastEl && lastEl.classList.contains('message') ? lastEl : null;
+    if (lastMsg) {
+      const prevLabel = dateLabel(+(lastMsg.getAttribute('data-ts') || 0));
+      const curLabel = dateLabel(m.timestamp);
+      if (prevLabel && curLabel && prevLabel !== curLabel) messagesEl.appendChild(makeDivider(curLabel));
+    }
+    messagesEl.appendChild(wrapper);
+  }
   return wrapper;
 }
 
-function renderMessages(msgs) {
+function renderMessages(msgs, onDone) {
   const batchSize = 20;
   let idx = 0;
+  let lastLabel = null;
   function next() {
     const end = Math.min(idx + batchSize, msgs.length);
-    for (; idx < end; idx++) renderSingleMessage(msgs[idx]);
+    for (; idx < end; idx++) {
+      const m = msgs[idx];
+      const label = dateLabel(m.timestamp);
+      if (label && label !== lastLabel) {
+        lastLabel = label;
+        messagesEl.appendChild(makeDivider(label));
+      }
+      renderSingleMessage(m);
+    }
     if (idx < msgs.length) requestAnimationFrame(next);
+    else { updateEmptyState(); if (onDone) onDone(); }
   }
   next();
+}
+
+// 空状态（无消息 / 搜索无结果）
+function updateEmptyState() {
+  let empty = messagesEl.querySelector('.emptyState');
+  const hasMsgs = !!messagesEl.querySelector('.message[data-id]');
+  if (hasMsgs) { if (empty) empty.remove(); return; }
+  if (!empty) {
+    empty = document.createElement('div');
+    empty.className = 'emptyState';
+    messagesEl.appendChild(empty);
+  }
+  if (searchInput.value.trim()) {
+    empty.innerHTML = '<div class="emptyIcon">🔍</div><div class="emptyTitle">没有找到匹配的消息</div><div class="emptyHint">换个关键词试试吧</div>';
+  } else {
+    empty.innerHTML = '<div class="emptyIcon">💬</div><div class="emptyTitle">这里还没有消息</div><div class="emptyHint">发送第一条消息开始聊天吧<br>也可以直接粘贴图片或拖拽文件上传</div>';
+  }
+}
+
+// 删除消息节点并修复日期分隔线、空状态
+function removeMessageEl(el) {
+  const prev = el.previousElementSibling;
+  const next = el.nextElementSibling;
+  el.remove();
+  if (prev && prev.classList.contains('dateDivider')) {
+    const above = prev.previousElementSibling;
+    const aboveMsg = above && above.classList.contains('message') ? above : null;
+    const nextMsg = next && next.classList.contains('message') ? next : null;
+    if (!aboveMsg || !nextMsg) prev.remove();
+    else {
+      const a = aboveMsg.getAttribute('data-ts');
+      const b = nextMsg.getAttribute('data-ts');
+      if (!a || !b || dateLabel(+a) === dateLabel(+b)) prev.remove();
+    }
+  }
+  updateEmptyState();
 }
 
 // ============ 消息编辑 ============
@@ -850,7 +955,7 @@ function showContextMenu(wrapper, m, x, y) {
       });
       const data = await safeJson(res);
       if (!res.ok || !data || !data.ok) throw new Error(data ? data.error : '删除失败');
-      wrapper.remove();
+      removeMessageEl(wrapper);
     } catch(e) { showToast('删除失败: ' + e.message, 'error'); }
   }});
   showContextMenuAt(items, x, y);
@@ -1246,12 +1351,16 @@ function createCustomVideoPlayer(url) {
 
 // ============ 发送消息 ============
 let isSending = false; // 防重入：发送期间 Enter/按钮连点不重复请求
+function setSendLabel(t) {
+  const labelEl = sendBtn.querySelector('.label');
+  if (labelEl) labelEl.textContent = t;
+}
 async function sendText() {
   const content = textInput.value.trim();
   if (!content || isSending) return;
   isSending = true;
   sendBtn.disabled = true;
-  sendBtn.textContent = '...';
+  setSendLabel('发送中');
   // 失败时恢复输入内容（仅当用户没有重新输入）
   const restoreInput = () => {
     if (!textInput.value.trim()) {
@@ -1277,7 +1386,7 @@ async function sendText() {
     // 本地渲染发送的消息（WS 广播也会推送，按 data-id 幂等去重，先到先得）
     renderSingleMessage(data.message);
   } catch(e) { restoreInput(); showToast('发送失败: ' + e.message, 'error'); }
-  finally { isSending = false; sendBtn.textContent = '发送'; updateSendButtonState(); }
+  finally { isSending = false; setSendLabel('发送'); updateSendButtonState(); }
 }
 function updateSendButtonState() {
   sendBtn.disabled = textInput.value.trim().length === 0;
@@ -1309,6 +1418,12 @@ textInput.addEventListener('paste', async (e) => {
     }
   }
 });
+
+messagesEl.addEventListener('scroll', updateScrollBtn, { passive: true });
+scrollBottomBtn.onclick = () => {
+  scrollBottomBtn.classList.remove('show');
+  messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' });
+};
 
 // ============ 上拉加载历史消息 ============
 messagesEl.addEventListener('scroll', async () => {
@@ -1343,13 +1458,28 @@ messagesEl.addEventListener('scroll', async () => {
     } else {
       // 在顶部插入新消息（批量渲染暂停朗读）
       messagesEl.setAttribute('aria-live', 'off');
+      const firstMsg = messagesEl.querySelector('.message[data-id]');
+      const startLabel = firstMsg ? dateLabel(+(firstMsg.getAttribute('data-ts') || 0)) : '';
+      const lastBatchLabel = msgs.length ? dateLabel(msgs[msgs.length - 1].timestamp) : '';
+      // 新批次与旧顶部消息同日：旧顶部的日期分隔线移交给新批次，避免重复
+      if (startLabel && lastBatchLabel === startLabel &&
+          firstMsg.previousElementSibling && firstMsg.previousElementSibling.classList.contains('dateDivider')) {
+        firstMsg.previousElementSibling.remove();
+      }
       const fragment = document.createDocumentFragment();
+      let lastLabel = startLabel;
       msgs.forEach(m => {
+        const label = dateLabel(m.timestamp);
+        if (label && label !== lastLabel) {
+          lastLabel = label;
+          fragment.appendChild(makeDivider(label));
+        }
         const el = createMessageElement(m);
         if (el) fragment.appendChild(el);
       });
       messagesEl.insertBefore(fragment, messagesEl.firstChild);
       messagesEl.setAttribute('aria-live', 'polite');
+      updateScrollBtn();
       // 保持滚动位置
       const newScrollHeight = messagesEl.scrollHeight;
       messagesEl.scrollTop = newScrollHeight - oldScrollHeight + oldScrollTop;
@@ -1451,7 +1581,7 @@ async function sendPlaceholderMessage(id, name, size, room) {
 }
 async function deleteMessage(id, room, passwordHash) {
   const el = messagesEl.querySelector('[data-id="'+id+'"]');
-  if (el && currentRoom === room) el.remove();
+  if (el && currentRoom === room) removeMessageEl(el);
   await fetch(API_ROOT + '/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({room,id,passwordHash}) });
 }
 async function uploadFileInChunks(file, fileId, room) {
@@ -1568,6 +1698,22 @@ function showImageViewer(url, name) {
 }
 
 // ============ 搜索和刷新 ============
+function updateSearchInfo(kw, count) {
+  if (!searchInfoEl) return;
+  if (!kw) { searchInfoEl.hidden = true; searchInfoEl.innerHTML = ''; return; }
+  searchInfoEl.innerHTML = '';
+  const span = document.createElement('span');
+  span.className = 'searchInfoText';
+  span.textContent = '搜索“' + kw + '”：' + count + ' 条结果';
+  searchInfoEl.appendChild(span);
+  const btn = document.createElement('button');
+  btn.className = 'searchInfoClear';
+  btn.textContent = '✕ 清除';
+  btn.onclick = () => { searchInput.value = ''; searchInfoEl.hidden = true; fetchMessages(true); };
+  searchInfoEl.appendChild(btn);
+  searchInfoEl.hidden = false;
+}
+
 let searchTimer = null;
 let searchComposing = false; // 输入法组合中不触发搜索（避免半截拼音打接口）
 const triggerSearch = () => {
